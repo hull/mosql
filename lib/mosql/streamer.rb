@@ -173,7 +173,7 @@ module MoSQL
       tailer.tail(:from => tail_from, :filter => options[:oplog_filter])
       until @done
         tailer.stream(1000) do |op|
-          handle_op(op)
+          options[:batch] ? queue_op(op) : handle_op(op)
         end
       end
     end
@@ -186,6 +186,95 @@ module MoSQL
         end
       else
         @sql.delete_ns(ns, selector)
+      end
+    end
+
+    def sync_objects ns, ids
+      table = @sql.table_for_ns(ns) rescue nil
+      collection = collection_for_ns(ns)
+      if table && collection && ids.count > 0
+        selector = { '_id' => { '$in' => ids.to_a } }
+        batch = collection.find(selector).map do |doc|
+          @schema.transform(ns, doc)
+        end
+        # This is a hack, just deleting the existing rows to
+        # reimport them via a COPY, which is way faster than
+        # individual updates
+        # TODO: Use Postgres 9.5 UPSERT instead of this
+        unsafe_handle_exceptions(ns, batch) do
+          @sql.db.transaction do
+            table.where(id: Array(ids).map(&:to_s)).delete
+            bulk_upsert(table, ns, batch)
+          end
+        end
+      end
+    end
+
+    def last_flushed_at ts=nil
+      if ts
+        @last_flushed_at = ts
+      else
+        @last_flushed_at ||= Time.now
+      end
+      @last_flushed_at
+    end
+
+    def flush_pending_ops
+      log.info "Flush pending ops - tailer at #{tailer.last_read['time']} - #{@tailed_ops_count} ops processed"
+      @pending_ops.map { |op| handle_op(op) }
+      @pending_updates.map do |ns, ids|
+        sync_objects(ns, ids)
+      end
+      last_flushed_at(Time.now)
+      tailer.batch_done
+      @tailed_ops_count = 0
+      @pending_ops = []
+      @pending_updates = {}
+      @pending_ops_count = 0
+    end
+
+    def queue_op op
+      log.debug "queue Op #{op.inspect}"
+      op_type = op['op']
+      selector = op['o2']
+      op_data = op['o']
+      ns = op['ns']
+
+      @last_flushed_at ||= Time.now
+      @tailed_ops_count ||= 0
+      @pending_updates ||= {}
+      @pending_updates[ns] ||= Set.new
+      @pending_ops ||= []
+      @pending_ops_count ||= 0
+      @skipped_ops_count ||= 0
+
+      @tailed_ops_count += 1
+      @tailed_total_count ||= 0
+      @tailed_total_count += 1
+
+      if op['op'] == 'u' && op['o'] && op['o'].keys.any? { |k| k.start_with? '$' }
+        selector = op['o2'] || {}
+        document_id = selector.keys.count == 1 && selector['_id']
+        if document_id && !@pending_updates[ns].include?(document_id)
+          @pending_updates[ns].add(document_id)
+          @pending_ops_count += 1
+        elsif !document_id
+          @skipped_ops_count += 1
+          log.warn "Skipping op #{op.inspect}"
+        end
+      elsif op['op'] == 'i' && op['o'] && op['o']['_id']
+        @pending_updates[ns].add(op['o']['_id'])
+        @pending_ops_count += 1
+      else
+        @pending_ops_count += 1
+        @pending_ops << op
+      end
+
+      if @tailed_ops_count % 1000 == 0
+        log.debug "Handle operation #{op['op']} - #{op['o2']} - #{@pending_ops_count} pending / #{@tailed_ops_count} tailed in batch / #{@tailed_total_count} total tailed"
+      end
+      if @pending_ops_count >= (options[:batch]) || (Time.now - last_flushed_at) > 60
+        flush_pending_ops
       end
     end
 

@@ -99,6 +99,10 @@ module MoSQL
           @options[:unsafe] = true
         end
 
+        opts.on("--batch [batch_size]", "Apply updates in batch mode") do |batch|
+          @options[:batch] = batch.to_i
+        end
+
         # eg, --oplog-filter '{"ns": {"$regex": "^somedb[0-9]*\\.collection$"}}'
         opts.on("--oplog-filter [filter]", "An additional JSON filter for the oplog query") do |filter|
           @options[:oplog_filter] = JSON.parse(filter)
@@ -156,7 +160,7 @@ module MoSQL
       metadata_table = MoSQL::Tailer.create_table(@sql.db, 'mosql_tailers')
 
       @tailer = MoSQL::Tailer.new([@mongo], :existing, metadata_table,
-                                  :service => options[:service])
+                                  :service => options[:service], :batch => options[:batch])
 
       @streamer = Streamer.new(:options => @options,
                                :tailer  => @tailer,
