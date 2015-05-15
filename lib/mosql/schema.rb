@@ -1,3 +1,5 @@
+require 'oj'
+
 module MoSQL
   class SchemaError < StandardError; end;
 
@@ -200,6 +202,12 @@ module MoSQL
       else
         v
       end
+    end
+
+    def transform_hash v
+      JSON.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }])
+    rescue => err
+      Oj.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }]).force_encoding("iso-8859-1").encode("utf-8")
     end
 
     def transform(ns, obj, schema=nil)
