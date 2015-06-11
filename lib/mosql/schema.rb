@@ -207,7 +207,13 @@ module MoSQL
     def transform_hash v
       JSON.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }])
     rescue => err
-      Oj.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }]).force_encoding("iso-8859-1").encode("utf-8")
+      Oj.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }], :mode => :compat, :time_format => :ruby, :use_to_json => true).force_encoding("iso-8859-1").encode("utf-8")
+    end
+
+    def clone obj
+      BSON.deserialize(BSON.serialize(obj))
+    rescue => err
+      JSON.parse transform_hash(obj)
     end
 
     def transform(ns, obj, schema=nil)
@@ -217,7 +223,7 @@ module MoSQL
 
       # Do a deep clone, because we're potentially going to be
       # mutating embedded objects.
-      obj = BSON.deserialize(BSON.serialize(obj))
+      obj = clone(obj)
 
       row = []
       schema[:columns].each do |col|
@@ -231,7 +237,7 @@ module MoSQL
           v = fetch_and_delete_dotted(obj, source)
           case v
           when Hash
-            v = JSON.dump(Hash[v.map { |k,v| [k, transform_primitive(v)] }])
+            v = transform_hash(v)
           when Array
             v = v.map { |it| transform_primitive(it) }
             if col[:array_type]
